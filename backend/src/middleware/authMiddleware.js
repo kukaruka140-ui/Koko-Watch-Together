@@ -1,93 +1,68 @@
-// ============================================================
-//  authMiddleware.js — Валидация Telegram initData
-//
-//  Telegram подписывает initData HMAC-SHA256 ключом бота.
-//  Мы проверяем подпись на сервере, чтобы убедиться,
-//  что запрос действительно пришёл из Telegram.
-//
-//  Документация: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
-// ============================================================
-
+// middleware/authMiddleware.js
 const crypto = require('crypto');
 
-const BOT_TOKEN = process.env.BOT_TOKEN || '';
-
-/**
- * Валидирует строку initData от Telegram WebApp.
- * Возвращает распарсенные данные пользователя или null при неудаче.
- *
- * @param {string} initData — строка из window.Telegram.WebApp.initData
- * @returns {{ user, auth_date, hash, ... } | null}
- */
-function validateInitData(initData) {
-  if (!initData || !BOT_TOKEN) return null;
-
+function validateTelegramInitData(initData, botToken) {
   try {
     const params = new URLSearchParams(initData);
     const hash = params.get('hash');
-    params.delete('hash');
+    if (!hash) return false;
 
-    // Формируем строку для проверки подписи
+    params.delete('hash');
     const checkString = [...params.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([k, v]) => `${k}=${v}`)
       .join('\n');
 
-    // Секретный ключ = HMAC-SHA256(BOT_TOKEN, "WebAppData")
     const secretKey = crypto
       .createHmac('sha256', 'WebAppData')
-      .update(BOT_TOKEN)
+      .update(botToken)
       .digest();
 
-    // Вычисляем ожидаемый hash
     const expectedHash = crypto
       .createHmac('sha256', secretKey)
       .update(checkString)
       .digest('hex');
 
-    if (expectedHash !== hash) return null;
-
-    // Проверяем свежесть данных (не старше 1 часа)
-    const authDate = parseInt(params.get('auth_date') || '0', 10);
-    if (Date.now() / 1000 - authDate > 3600) return null;
-
-    // Возвращаем распарсенные данные
-    const userData = params.get('user');
-    return {
-      ...Object.fromEntries(params),
-      user: userData ? JSON.parse(userData) : null
-    };
+    return expectedHash === hash;
   } catch {
-    return null;
+    return false;
   }
 }
 
-/**
- * Socket.io middleware для проверки initData при подключении.
- * Добавляет socket.telegramUser при успешной валидации.
- *
- * В dev-режиме (BOT_TOKEN не задан) — пропускает всех.
- */
 function socketAuthMiddleware(socket, next) {
-  // DEV-режим: пропускаем проверку
-  if (!BOT_TOKEN) {
-    socket.telegramUser = {
-      id: socket.id,
-      first_name: 'Dev User',
-      username: 'devuser'
-    };
+  // ✅ В режиме разработки или SKIP_AUTH=true — пропускаем проверку
+  if (process.env.SKIP_AUTH === 'true' || process.env.NODE_ENV !== 'production') {
+    socket.telegramUser = { id: 0, first_name: 'Browser User' };
     return next();
   }
 
-  const initData = socket.handshake.auth?.initData;
-  const validated = validateInitData(initData);
+  const initData = socket.handshake.auth?.initData || 
+                   socket.handshake.query?.initData;
 
-  if (!validated) {
+  if (!initData) {
+    return next(new Error('Unauthorized: no initData'));
+  }
+
+  const botToken = process.env.BOT_TOKEN;
+  if (!botToken) {
+    // Если BOT_TOKEN не задан — пропускаем (misconfiguration, не блокируем)
+    socket.telegramUser = { id: 0, first_name: 'Unknown' };
+    return next();
+  }
+
+  if (!validateTelegramInitData(initData, botToken)) {
     return next(new Error('Unauthorized: invalid Telegram initData'));
   }
 
-  socket.telegramUser = validated.user;
+  // Парсим user из initData
+  try {
+    const params = new URLSearchParams(initData);
+    socket.telegramUser = JSON.parse(params.get('user') || '{}');
+  } catch {
+    socket.telegramUser = { id: 0, first_name: 'User' };
+  }
+
   next();
 }
 
-module.exports = { socketAuthMiddleware, validateInitData };
+module.exports = { socketAuthMiddleware };
