@@ -1,0 +1,152 @@
+/* ============================================================
+   globals.css — Глобальные стили RAVE TMA
+   Тёмная тема, кастомные скроллбары, Video.js переопределения
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&display=swap');
+@import 'video.js/dist/video-js.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── CSS-переменные ────────────────────────────────────────── */
+:root {
+  --rave-bg:          #0A0A0F;
+  --rave-surface:     #12121A;
+  --rave-elevated:    #1A1A26;
+  --rave-border:      #2A2A3E;
+  --rave-accent:      #7C5CFC;
+  --rave-accent-dim:  #5A3FD4;
+  --rave-glow:        #7C5CFC33;
+  --rave-text:        #E8E8F0;
+  --rave-muted:       #6B6B8A;
+  --rave-host:        #FF6B9D;
+  --rave-guest:       #56CFE1;
+
+  /* Высота телефона — для layout без горизонтального скролла */
+  --tg-viewport-height: 100vh;
+}
+
+/* ─── База ──────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: var(--rave-bg);
+  color: var(--rave-text);
+  font-family: 'DM Sans', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none; /* отключаем pull-to-refresh в WebView */
+}
+
+/* ─── Скроллбар ─────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 3px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--rave-border);
+  border-radius: 99px;
+}
+
+/* ─── Выделение текста ──────────────────────────────────────── */
+::selection {
+  background: var(--rave-accent);
+  color: #fff;
+}
+
+/* ─── Video.js кастомизация ─────────────────────────────────── */
+.video-js {
+  width: 100% !important;
+  height: 100% !important;
+  background: #000;
+}
+
+/* Скрываем стандартный большой play-button */
+.video-js .vjs-big-play-button {
+  display: none;
+}
+
+/* Контролбар */
+.video-js .vjs-control-bar {
+  background: linear-gradient(transparent, rgba(0,0,0,0.85));
+  height: 48px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+}
+
+/* Прогресс-бар */
+.video-js .vjs-progress-control {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  width: 100%;
+  height: 4px;
+}
+
+.video-js .vjs-play-progress {
+  background: var(--rave-accent);
+}
+
+.video-js .vjs-play-progress::before {
+  color: var(--rave-accent);
+  top: -5px;
+  font-size: 14px;
+}
+
+.video-js .vjs-slider {
+  background: rgba(255,255,255,0.15);
+}
+
+/* Кнопки контролбара */
+.video-js .vjs-button > .vjs-icon-placeholder::before {
+  font-size: 22px;
+  line-height: 48px;
+}
+
+.video-js .vjs-time-control {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  line-height: 48px;
+  padding: 0 4px;
+}
+
+/* Буферизация */
+.video-js .vjs-load-progress {
+  background: rgba(255,255,255,0.1);
+}
+
+/* ─── Утилиты ───────────────────────────────────────────────── */
+.rave-glass {
+  background: rgba(18, 18, 26, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.rave-glow {
+  box-shadow: 0 0 0 1px var(--rave-accent),
+              0 0 16px var(--rave-glow);
+}
+
+/* Обрезка текста */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

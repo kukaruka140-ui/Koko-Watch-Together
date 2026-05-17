@@ -1,0 +1,73 @@
+/* VideoPlayer.css — Стили контейнера плеера */
+
+.video-player-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+}
+
+/* Оверлей при паузе */
+.video-player-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+/* Большая кнопка play/pause по центру (исчезает через 1.5с) */
+.play-indicator {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: rgba(124, 92, 252, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: playIndicator 0.6s ease-out forwards;
+}
+
+@keyframes playIndicator {
+  0%   { transform: scale(0.7); opacity: 1; }
+  60%  { transform: scale(1.1); opacity: 1; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+/* Статус синхронизации */
+.sync-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: 'DM Sans', sans-serif;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+.sync-badge.synced {
+  background: rgba(86, 207, 225, 0.2);
+  color: #56CFE1;
+  border: 1px solid rgba(86, 207, 225, 0.3);
+}
+
+.sync-badge.buffering {
+  background: rgba(255, 180, 0, 0.2);
+  color: #FFB400;
+  border: 1px solid rgba(255, 180, 0, 0.3);
+}
+
+/* Контейнер реакций — поверх видео */
+.reactions-container {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
