@@ -1,99 +1,85 @@
-// ============================================================
-//  driveProxy.js — HTTP-прокси для Google Drive видео-стримов
-//
-//  Зачем нужен:
-//  1. Google Drive CORS блокирует запросы из Telegram WebView
-//  2. Нужна поддержка HTTP Range для перемотки (206 Partial Content)
-//  3. Авторизация через API-ключ прячется на сервере
-// ============================================================
-
+// Исправленный driveProxy с обходом Google confirmation page
 const express = require('express');
 const https   = require('https');
 const router  = express.Router();
 
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
 
-/**
- * GET /api/stream?fileId=FILE_ID
- *
- * Проксирует видео-файл с Google Drive с поддержкой Range-запросов.
- * Файл должен быть публично доступен ("Anyone with the link" → Viewer).
- *
- * Пример использования в плеере:
- *   src = `${BACKEND_URL}/api/stream?fileId=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs`
- */
-router.get('/stream', (req, res) => {
-  const { fileId } = req.query;
-
-  if (!fileId || !/^[-\w]{10,}$/.test(fileId)) {
-    return res.status(400).json({ error: 'Некорректный fileId' });
+function fetchWithRedirects(url, headers, res, redirectCount = 0) {
+  if (redirectCount > 5) {
+    if (!res.headersSent) res.status(502).json({ error: 'Слишком много редиректов' });
+    return;
   }
 
-  // Формируем URL к Google Drive API
-  const apiUrl = GOOGLE_API_KEY
-    ? `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${GOOGLE_API_KEY}`
-    : `https://drive.google.com/uc?export=download&id=${fileId}`;
-
-  // Пробрасываем Range-заголовок (критично для перемотки видео)
-  const proxyHeaders = {
-    'User-Agent': 'Mozilla/5.0'
+  const urlObj = new URL(url);
+  const options = {
+    hostname: urlObj.hostname,
+    path: urlObj.pathname + urlObj.search,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      ...headers
+    }
   };
-  if (req.headers.range) {
-    proxyHeaders['Range'] = req.headers.range;
-  }
 
-  const proxyReq = https.request(apiUrl, { headers: proxyHeaders }, (proxyRes) => {
-    // CORS для Telegram WebView
+  const proxyReq = https.request(options, (proxyRes) => {
+    if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode)) {
+      const location = proxyRes.headers['location'];
+      if (location) {
+        proxyRes.resume();
+        return fetchWithRedirects(location, headers, res, redirectCount + 1);
+      }
+    }
+
+    const contentType = proxyRes.headers['content-type'] || '';
+    if (contentType.includes('text/html')) {
+      proxyRes.resume();
+      if (!res.headersSent) {
+        res.status(403).json({ 
+          error: 'Google Drive требует подтверждения. Файл не публичный или слишком большой.'
+        });
+      }
+      return;
+    }
+
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
     res.setHeader('Accept-Ranges', 'bytes');
-
-    // Прокидываем статус Google (200 или 206 Partial Content)
     res.status(proxyRes.statusCode);
 
-    // Прокидываем нужные заголовки ответа
-    const passthrough = [
-      'content-type',
-      'content-length',
-      'content-range',
-      'last-modified',
-      'etag',
-      'cache-control'
-    ];
-    passthrough.forEach(header => {
-      if (proxyRes.headers[header]) {
-        res.setHeader(header, proxyRes.headers[header]);
-      }
+    const passthrough = ['content-type','content-length','content-range','last-modified','etag','cache-control'];
+    passthrough.forEach(h => {
+      if (proxyRes.headers[h]) res.setHeader(h, proxyRes.headers[h]);
     });
 
-    // Стримим тело ответа напрямую клиенту (без буферизации в памяти)
     proxyRes.pipe(res);
-
-    proxyRes.on('error', (err) => {
-      console.error('[DriveProxy] Ошибка стрима:', err.message);
-    });
   });
 
-  proxyReq.on('error', (err) => {
-    console.error('[DriveProxy] Ошибка запроса к Google:', err.message);
-    if (!res.headersSent) {
-      res.status(502).json({ error: 'Ошибка проксирования видео' });
-    }
+  proxyReq.on('error', err => {
+    if (!res.headersSent) res.status(502).json({ error: 'Ошибка запроса к Google' });
   });
 
-  // Таймаут 10с на подключение к Google
-  proxyReq.setTimeout(10000, () => {
+  proxyReq.setTimeout(15000, () => {
     proxyReq.destroy();
-    if (!res.headersSent) {
-      res.status(504).json({ error: 'Таймаут подключения к Google Drive' });
-    }
+    if (!res.headersSent) res.status(504).json({ error: 'Таймаут' });
   });
 
   proxyReq.end();
+}
+
+router.get('/stream', (req, res) => {
+  const { fileId } = req.query;
+  if (!fileId) return res.status(400).json({ error: 'fileId обязателен' });
+
+  const rangeHeader = req.headers.range ? { 'Range': req.headers.range } : {};
+
+  const url = GOOGLE_API_KEY
+    ? `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${GOOGLE_API_KEY}`
+    : `https://drive.google.com/uc?export=download&confirm=t&id=${fileId}`;
+
+  fetchWithRedirects(url, rangeHeader, res);
 });
 
-// OPTIONS preflight для CORS
 router.options('/stream', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
