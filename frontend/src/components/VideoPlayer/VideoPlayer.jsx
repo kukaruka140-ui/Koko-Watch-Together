@@ -34,13 +34,14 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
   // Формируем src: Google Drive через прокси или прямой URL
   const buildSrc = (url) => {
     if (!url) return '';
-    // Google Drive fileId (прямой или из ссылки)
-    const driveMatch = url.match(/[-\w]{25,}/);
-    if (url.includes('drive.google.com') || url.includes('googleapis.com')) {
-      const fileId = driveMatch?.[0];
-      return fileId ? `${BACKEND_URL}/api/stream?fileId=${fileId}` : url;
+    // Прямая ссылка — возвращаем как есть
+    if (!url.includes('drive.google.com') && !url.includes('googleapis.com')) {
+      return url;
     }
-    return url;
+    // Google Drive — извлекаем fileId
+    const match = url.match(/\/d\/([a-zA-Z0-9_-]{10,})/);
+    const fileId = match?.[1] || url;
+    return `${BACKEND_URL}/api/stream?fileId=${fileId}`;
   };
 
   const src = buildSrc(videoUrl);
