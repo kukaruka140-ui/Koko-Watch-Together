@@ -1,8 +1,3 @@
-// ============================================================
-//  server.js — Точка входа RAVE TMA Backend
-//  Express + Socket.io + In-Memory Rooms
-// ============================================================
-
 require('dotenv').config();
 
 const express    = require('express');
@@ -18,126 +13,91 @@ const { socketAuthMiddleware } = require('./middleware/authMiddleware');
 
 const PORT = process.env.PORT || 3001;
 
-// ─── Express ─────────────────────────────────────────────────
 const app = express();
-
-app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
-  methods: ['GET', 'OPTIONS', 'POST']
-}));
+app.use(cors({ origin: process.env.FRONTEND_URL || '*', methods: ['GET', 'OPTIONS', 'POST'] }));
 app.use(express.json());
-
-// Google Drive прокси-стриминг
 app.use('/api', driveProxy);
 
-// Health-check для мониторинга и деплоя
 app.get('/health', (_, res) => {
-  res.json({
-    ok: true,
-    rooms: roomManager.rooms.size,
-    uptime: process.uptime()
-  });
+  res.json({ ok: true, rooms: roomManager.rooms.size, uptime: process.uptime() });
 });
 
-// ─── HTTP-сервер + Socket.io ──────────────────────────────────
 const httpServer = http.createServer(app);
-
 const io = new Server(httpServer, {
-  cors: {
-    origin: process.env.FRONTEND_URL || '*',
-    methods: ['GET', 'POST']
-  },
+  cors: { origin: process.env.FRONTEND_URL || '*', methods: ['GET', 'POST'] },
   pingTimeout:  15000,
   pingInterval: 5000
 });
 
-// Telegram initData валидация на уровне подключения
 io.use(socketAuthMiddleware);
 
-// ─── Таймеры реконнекта ───────────────────────────────────────
-// FIX: храним таймеры по socketId чтобы отменять их при реконнекте
-// и при создании новой комнаты (иначе старый таймер закрывал новую комнату)
-const reconnectTimers = new Map(); // socketId → timerId
+// Таймери реконнекту тільки для хоста (хост = власник кімнати)
+// Гість скидається одразу при disconnect — слот вільниться миттєво
+const hostReconnectTimers = new Map(); // socketId → timerId
 
-function clearReconnectTimer(socketId) {
-  const timer = reconnectTimers.get(socketId);
-  if (timer) {
-    clearTimeout(timer);
-    reconnectTimers.delete(socketId);
-  }
+function clearHostTimer(socketId) {
+  const t = hostReconnectTimers.get(socketId);
+  if (t) { clearTimeout(t); hostReconnectTimers.delete(socketId); }
 }
 
-// ─── Обработка подключений ────────────────────────────────────
 io.on('connection', (socket) => {
   const user = socket.telegramUser;
-  console.log(`[Socket.io] ✅ Подключился: ${socket.id} (${user?.first_name || 'anon'})`);
+  console.log(`[Socket.io] ✅ ${socket.id} (${user?.first_name || 'anon'})`);
 
-  // ── Создание комнаты (Хост) ──────────────────────────────
+  // ── Створення кімнати (Хост) ─────────────────────────────
   socket.on('create_room', ({ videoUrl, userName }, callback) => {
     try {
       if (!videoUrl || typeof videoUrl !== 'string') {
         return callback({ error: 'videoUrl обязателен' });
       }
-
       const room = roomManager.createRoom(socket.id, videoUrl.trim());
       room.hostName = userName || user?.first_name || 'Host';
-
       socket.join(room.roomId);
-
-      console.log(`[create_room] ${room.hostName} создал комнату ${room.roomId}`);
-
-      callback({
-        ok: true,
-        roomId: room.roomId,
-        role: 'host',
-        state: room.toClientState()
-      });
-
+      console.log(`[create_room] ${room.hostName} → ${room.roomId}`);
+      callback({ ok: true, roomId: room.roomId, role: 'host', state: room.toClientState() });
     } catch (err) {
-      console.error('[create_room] Ошибка:', err);
+      console.error('[create_room]', err);
       callback({ error: 'Не удалось создать комнату' });
     }
   });
 
-  // ── Вход в комнату (Гость) ───────────────────────────────
+  // ── Вхід в кімнату (Гість) ──────────────────────────────
   socket.on('join_room', ({ roomId, userName }, callback) => {
     try {
       if (!roomId) return callback({ error: 'roomId обязателен' });
-
       const room = roomManager.getRoom(roomId.toUpperCase());
+      if (!room) return callback({ error: 'Комната не найдена. Проверьте код.' });
 
-      if (!room) {
-        return callback({ error: 'Комната не найдена. Проверьте код.' });
+      // FIX БАГ 2: гість може зайти якщо:
+      // - слот вільний (guestSocketId === null)
+      // - або це той самий сокет (рідко)
+      // - або кімната "повна" але старий гостьовий сокет вже не підключений
+      //   (disconnect вже скинув guestSocketId на null — дивись нижче)
+      // Більше НЕ блокуємо по isFull() без перевірки живості сокету
+      if (room.guestSocketId !== null && room.guestSocketId !== socket.id) {
+        // Перевіряємо чи старий гостьовий сокет ще реально підключений
+        const oldGuestSocket = io.sockets.sockets.get(room.guestSocketId);
+        if (oldGuestSocket && oldGuestSocket.connected) {
+          return callback({ error: 'В комнате уже два участника' });
+        }
+        // Старий сокет мертвий — звільняємо слот
+        room.guestSocketId = null;
       }
-
-      if (room.isFull() && room.guestSocketId !== socket.id) {
-        return callback({ error: 'В комнате уже два участника' });
-      }
-
-      // FIX: если гость реконнектится — отменяем его старый таймер удаления
-      clearReconnectTimer(room.guestSocketId);
 
       room.guestSocketId = socket.id;
-      room.guestName = userName || user?.first_name || 'Guest';
-
+      room.guestName     = userName || user?.first_name || 'Guest';
       socket.join(roomId.toUpperCase());
-
-      console.log(`[join_room] ${room.guestName} вошёл в комнату ${room.roomId}`);
+      console.log(`[join_room] ${room.guestName} → ${room.roomId}`);
 
       socket.to(room.roomId).emit('user_joined', {
-        userId:   socket.id,
-        userName: room.guestName
+        userId: socket.id, userName: room.guestName
       });
 
-      callback({
-        ok: true,
-        role: 'guest',
-        state: room.toClientState(),
-        hostName: room.hostName
-      });
-
+      // FIX БАГ 1: toClientState() вже повертає getCurrentTime() з урахуванням
+      // elapsed — гість отримує актуальну позицію, а не 0
+      callback({ ok: true, role: 'guest', state: room.toClientState(), hostName: room.hostName });
     } catch (err) {
-      console.error('[join_room] Ошибка:', err);
+      console.error('[join_room]', err);
       callback({ error: 'Не удалось войти в комнату' });
     }
   });
@@ -147,66 +107,46 @@ io.on('connection', (socket) => {
 
   // ── Disconnect ───────────────────────────────────────────
   socket.on('disconnect', (reason) => {
-    console.log(`[Socket.io] ❌ Отключился: ${socket.id} | причина: ${reason}`);
+    console.log(`[Socket.io] ❌ ${socket.id} | ${reason}`);
 
     const room = roomManager.findRoomBySocket(socket.id);
     if (!room) return;
 
     const isHost   = room.isHost(socket.id);
-    const userName = isHost ? room.hostName : room.guestName;
-    const roomId   = room.roomId; // сохраняем до таймера
+    const uName    = isHost ? room.hostName : room.guestName;
+    const roomId   = room.roomId;
 
     socket.to(roomId).emit('user_disconnected', {
-      userId:        socket.id,
-      userName,
-      role:          isHost ? 'host' : 'guest',
-      willReconnect: true
+      userId: socket.id, userName: uName,
+      role: isHost ? 'host' : 'guest', willReconnect: isHost
     });
 
-    // FIX: сохраняем таймер по socketId — чтобы можно было отменить
-    // если этот же сокет (или новый сокет того же юзера) вернётся раньше
+    if (!isHost) {
+      // FIX БАГ 2: гість — одразу скидаємо слот.
+      // Немає сенсу тримати 30с — гість може зайти знову в будь-який момент.
+      room.guestSocketId = null;
+      console.log(`[disconnect] Гость ${uName} вышел, слот освобождён`);
+      io.to(roomId).emit('user_left', { userId: socket.id, userName: uName });
+      return;
+    }
+
+    // Хост — даємо 30с на реконнект перед закриттям кімнати
+    clearHostTimer(socket.id);
     const timer = setTimeout(() => {
-      reconnectTimers.delete(socket.id);
-
-      const currentRoom = roomManager.getRoom(roomId);
-      if (!currentRoom) return; // комната уже закрыта
-
-      const stillGone = isHost
-        ? currentRoom.hostSocketId === socket.id
-        : currentRoom.guestSocketId === socket.id;
-
-      // FIX: если socketId изменился — юзер уже переподключился с новым сокетом
-      // (например создал новую комнату). Не трогаем ничего.
-      if (!stillGone) return;
-
-      console.log(`[disconnect] Таймаут реконнекта для ${socket.id} в ${roomId}`);
-
-      if (isHost) {
-        io.to(roomId).emit('room_closed', {
-          reason:  'host_left',
-          message: `${userName} покинул комнату`
-        });
-        roomManager.deleteRoom(roomId);
-      } else {
-        currentRoom.guestSocketId = null;
-        io.to(roomId).emit('user_left', {
-          userId: socket.id,
-          userName
-        });
-      }
+      hostReconnectTimers.delete(socket.id);
+      const cur = roomManager.getRoom(roomId);
+      if (!cur) return;
+      if (cur.hostSocketId !== socket.id) return; // вже реконнектився
+      console.log(`[disconnect] Хост ${uName} не вернулся, закрываем ${roomId}`);
+      io.to(roomId).emit('room_closed', { reason: 'host_left', message: `${uName} покинул комнату` });
+      roomManager.deleteRoom(roomId);
     }, 30_000);
-
-    reconnectTimers.set(socket.id, timer);
+    hostReconnectTimers.set(socket.id, timer);
   });
 });
 
-// ─── Запуск ───────────────────────────────────────────────────
 httpServer.listen(PORT, () => {
-  console.log('\n╔══════════════════════════════════════════╗');
-  console.log('║  🎬  RAVE TMA Server запущен              ║');
-  console.log(`║  WS:    ws://localhost:${PORT}              ║`);
-  console.log(`║  Proxy: http://localhost:${PORT}/api/stream ║`);
-  console.log('╚══════════════════════════════════════════╝\n');
+  console.log(`\n🎬  RAVE сервер запущен на порту ${PORT}\n`);
 });
 
 module.exports = { app, io };
