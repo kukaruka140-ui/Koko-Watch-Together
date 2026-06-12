@@ -1,8 +1,5 @@
 // ============================================================
 //  App.jsx — Корневой компонент приложения
-//
-//  Управляет переходом между лобби и комнатой.
-//  Инициализирует Telegram SDK и WebSocket-подключение.
 // ============================================================
 
 import { useRef, useState, useEffect } from 'react';
@@ -11,14 +8,15 @@ import { useSync }           from './hooks/useSync';
 import useRoomStore          from './store/useRoomStore';
 import RoomLobby             from './components/Room/RoomLobby';
 import RoomScreen            from './components/Room/RoomScreen';
-import { destroySocket }     from './lib/socket';
 
 export default function App() {
   const { user, initData, isReady } = useTelegram();
   const { roomId, reset }           = useRoomStore();
 
-  // ref для методов управления плеером
-  // (заполняется внутри VideoPlayer через controlsRef)
+  // FIX: ключ для принудительного ремаунта VideoPlayer при создании новой комнаты.
+  // Без этого VideoPlayer не сбрасывается и src остаётся от предыдущей сессии.
+  const [sessionKey, setSessionKey] = useState(0);
+
   const videoControlsRef = useRef({
     play:           () => {},
     pause:          () => {},
@@ -26,8 +24,6 @@ export default function App() {
     getCurrentTime: () => 0
   });
 
-  // Прокси-объект: useSync вызывает методы через ref,
-  // а VideoPlayer их регистрирует. Это разрывает циклическую зависимость.
   const videoControls = {
     play:           (...args) => videoControlsRef.current?.play?.(...args),
     pause:          (...args) => videoControlsRef.current?.pause?.(...args),
@@ -35,11 +31,9 @@ export default function App() {
     getCurrentTime: (...args) => videoControlsRef.current?.getCurrentTime?.(...args) ?? 0
   };
 
-  // Инициализируем WebSocket-синхронизацию
   const { createRoom, joinRoom, sendPlaybackAction, sendMessage, sendReaction } =
     useSync(videoControls, initData);
 
-  // Передаём имя пользователя из Telegram в создание/вход
   const userName = user
     ? [user.first_name, user.last_name].filter(Boolean).join(' ')
     : '';
@@ -52,11 +46,11 @@ export default function App() {
 
   const handleLeave = () => {
     reset();
-    // Не разрываем сокет-соединение полностью —
-    // просто сбрасываем состояние комнаты
+    // FIX: новый sessionKey → VideoPlayer полностью ремаунтируется
+    // и получает свежий src/controlsRef при следующем заходе в комнату
+    setSessionKey(k => k + 1);
   };
 
-  // Заглушка при инициализации
   if (!isReady) {
     return (
       <div className="flex items-center justify-center h-screen" style={{ background: '#0A0A0F' }}>
@@ -80,14 +74,15 @@ export default function App() {
   return (
     <>
       {!roomId ? (
-        /* Лобби — создание или вход в комнату */
         <RoomLobby
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
         />
       ) : (
-        /* Комната — видео + чат */
+        // FIX: key={sessionKey} — при кожному виході/вході RoomScreen і VideoPlayer
+        // повністю ремаунтуються: очищається src, controlsRef, стан плеєра
         <RoomScreen
+          key={sessionKey}
           videoControlsRef={videoControlsRef}
           syncMethods={{ sendPlaybackAction, sendMessage, sendReaction }}
           onLeave={handleLeave}
