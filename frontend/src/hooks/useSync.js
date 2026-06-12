@@ -62,7 +62,7 @@ export function useSync(videoControls, initData = '') {
       // Компенсируем сетевую задержку
       const compensated = compensateLatency(currentTime, serverTime, isPlaying);
 
-      // Обновляем Zustand store
+      // Обновляем Zustand store (lastSyncedAt обновляется внутри setPlayback)
       setPlayback({ isPlaying, currentTime: compensated });
 
       // Хост уже управляет плеером напрямую через свой UI —
@@ -84,17 +84,31 @@ export function useSync(videoControls, initData = '') {
     });
 
     // ── Drift-коррекция (периодическая проверка дрейфа) ───
-    // Каждые 10с проверяем, не ушёл ли плеер с правильной позиции
+    // Каждые 10с проверяем, не ушёл ли плеер с правильной позиции.
+    //
+    // FIX: вместо store.currentTime (застывший снимок на момент последнего sync)
+    // вычисляем "живую" ожидаемую позицию: currentTime + сколько прошло с lastSyncedAt.
+    // Без этого drift всегда был огромным (playerTime ≈ 5s, store.currentTime ≈ 0)
+    // и каждые ~10с плеер кидало seek(0).
     const driftCheckInterval = setInterval(() => {
       const store = useRoomStore.getState();
-      if (!store.isPlaying || !store.roomId) return;
+      if (!store.isPlaying || !store.roomId || store.lastSyncedAt === null) return;
 
       const playerTime = videoControls.getCurrentTime();
-      const drift = getDriftAction(playerTime, store.currentTime);
+
+      // Сколько секунд прошло с момента последней синхронизации
+      const elapsed = (Date.now() - store.lastSyncedAt) / 1000;
+      // Где должен быть плеер прямо сейчас
+      const expectedTime = store.currentTime + elapsed;
+
+      const drift = getDriftAction(playerTime, expectedTime);
 
       if (drift === 'hard') {
-        console.warn(`[Sync] Жёсткий drift: плеер ${playerTime.toFixed(2)}s, ожидается ~${store.currentTime.toFixed(2)}s`);
-        videoControls.seek(store.currentTime);
+        console.warn(
+          `[Sync] Жёсткий drift: плеер ${playerTime.toFixed(2)}s, ` +
+          `ожидается ~${expectedTime.toFixed(2)}s (sync был ${elapsed.toFixed(1)}s назад)`
+        );
+        videoControls.seek(expectedTime);
       }
       // soft drift — плеер сам выровняется естественным образом
     }, 10_000);
