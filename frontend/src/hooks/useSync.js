@@ -1,11 +1,5 @@
 // ============================================================
 //  useSync.js — Главный хук синхронизации
-//
-//  Подключается к WebSocket серверу, обрабатывает все события:
-//  - Создание и вход в комнату
-//  - Синхронизация воспроизведения (play/pause/seek)
-//  - Компенсация задержки сети
-//  - Чат и реакции
 // ============================================================
 
 import { useEffect, useRef, useCallback } from 'react';
@@ -13,15 +7,19 @@ import { getSocket } from '../lib/socket';
 import useRoomStore from '../store/useRoomStore';
 import { compensateLatency, getDriftAction, updateRTT } from '../lib/syncUtils';
 
-const PING_INTERVAL = 5000; // пинг каждые 5 секунд
+const PING_INTERVAL = 5000;
 
-/**
- * @param {object} videoControls — { play, pause, seek, getCurrentTime } из useVideoPlayer
- * @param {string} initData      — Telegram initData для авторизации
- */
 export function useSync(videoControls, initData = '') {
   const socket = getSocket(initData);
-  const pingTimerRef = useRef(null);
+  const pingTimerRef  = useRef(null);
+
+  // FIX: время последнего seek/sync — drift-check игнорируется
+  // в течение SEEK_COOLDOWN мс после любого перемотки.
+  // Без этого drift-check успевает сработать в окно между
+  // локальным seek() и получением playback_sync от сервера,
+  // и кидает плеер обратно на старую позицию.
+  const lastSeekAtRef = useRef(0);
+  const SEEK_COOLDOWN = 2000; // мс
 
   const {
     setRoom,
@@ -34,11 +32,9 @@ export function useSync(videoControls, initData = '') {
     reset
   } = useRoomStore();
 
-  // ── Подписка на события сервера ───────────────────────────
   useEffect(() => {
     setConnectionStatus('connecting');
 
-    // ── Статус соединения ──────────────────────────────────
     socket.on('connect', () => {
       setConnectionStatus('connected');
       startPingLoop();
@@ -49,102 +45,81 @@ export function useSync(videoControls, initData = '') {
       stopPingLoop();
     });
 
-    // ── Измерение RTT (ping/pong) ──────────────────────────
     socket.on('pong', ({ clientTime }) => {
       const avgRTT = updateRTT(clientTime);
       setRTT(avgRTT);
     });
 
-    // ── Синхронизация воспроизведения ─────────────────────
-    // Сервер рассылает это событие ВСЕМ участникам комнаты
-    // при каждом действии хоста (play/pause/seek)
     socket.on('playback_sync', ({ action, currentTime, isPlaying, serverTime }) => {
-      // Компенсируем сетевую задержку
       const compensated = compensateLatency(currentTime, serverTime, isPlaying);
 
-      // Обновляем Zustand store (lastSyncedAt обновляется внутри setPlayback)
+      // Обновляем store (lastSyncedAt обновляется внутри setPlayback)
       setPlayback({ isPlaying, currentTime: compensated });
 
-      // Хост уже управляет плеером напрямую через свой UI —
-      // не нужно повторно вызывать play()/pause()/seek() по echo от сервера,
-      // иначе программный play() без жеста пользователя будет заблокирован браузером.
+      // Сбрасываем cooldown — store теперь актуален, drift-check снова разрешён
+      lastSeekAtRef.current = 0;
+
       const { role } = useRoomStore.getState();
       if (role === 'host') return;
 
-      // Управляем плеером (только гость)
       if (action === 'play') {
         videoControls.seek(compensated);
-        videoControls.play(); // может показать кнопку если браузер заблокировал
+        videoControls.play();
       } else if (action === 'pause') {
         videoControls.seek(compensated);
         videoControls.pause();
       } else if (action === 'seek') {
         videoControls.seek(compensated);
+        // После seek со стороны хоста — тоже ставим cooldown
+        // чтобы не дёргать гостя пока его плеер перематывает
+        lastSeekAtRef.current = Date.now();
       }
     });
 
-    // ── Drift-коррекция (периодическая проверка дрейфа) ───
-    // Каждые 10с проверяем, не ушёл ли плеер с правильной позиции.
-    //
-    // FIX: вместо store.currentTime (застывший снимок на момент последнего sync)
-    // вычисляем "живую" ожидаемую позицию: currentTime + сколько прошло с lastSyncedAt.
+    // ── Drift-коррекция ────────────────────────────────────
     const driftCheckInterval = setInterval(() => {
       const store = useRoomStore.getState();
       if (!store.isPlaying || !store.roomId || store.lastSyncedAt === null) return;
 
-      const playerTime = videoControls.getCurrentTime();
+      // Пропускаем проверку если недавно был seek
+      const msSinceSeek = Date.now() - lastSeekAtRef.current;
+      if (lastSeekAtRef.current > 0 && msSinceSeek < SEEK_COOLDOWN) return;
 
-      // Сколько секунд прошло с момента последней синхронизации
-      const elapsed = (Date.now() - store.lastSyncedAt) / 1000;
-      // Где должен быть плеер прямо сейчас
+      const playerTime   = videoControls.getCurrentTime();
+      const elapsed      = (Date.now() - store.lastSyncedAt) / 1000;
       const expectedTime = store.currentTime + elapsed;
 
       const drift = getDriftAction(playerTime, expectedTime);
 
       if (drift === 'hard') {
         console.warn(
-          `[Sync] Жёсткий drift: плеер ${playerTime.toFixed(2)}s, ` +
-          `ожидается ~${expectedTime.toFixed(2)}s (sync был ${elapsed.toFixed(1)}s назад)`
+          `[Sync] Hard drift: player=${playerTime.toFixed(2)}s ` +
+          `expected=${expectedTime.toFixed(2)}s (${elapsed.toFixed(1)}s ago)`
         );
         videoControls.seek(expectedTime);
+        lastSeekAtRef.current = Date.now(); // cooldown после корректирующего seek
       }
-      // soft drift — плеер сам выровняется естественным образом
     }, 10_000);
 
-    // ── Запрос актуального состояния от хоста ─────────────
-    socket.on('playback_request', ({ userId, action, currentTime }) => {
+    socket.on('playback_request', ({ action, currentTime }) => {
       console.log(`[Sync] Запрос от гостя: ${action} @ ${currentTime}`);
     });
 
-    // ── Входящий пользователь ─────────────────────────────
     socket.on('user_joined', ({ userName }) => {
       setPeerConnected(true);
       console.log(`[Sync] ${userName} присоединился`);
     });
 
-    socket.on('user_disconnected', () => {
-      setPeerConnected(false);
-    });
+    socket.on('user_disconnected', () => setPeerConnected(false));
+    socket.on('user_left',         () => setPeerConnected(false));
 
-    socket.on('user_left', () => {
-      setPeerConnected(false);
-    });
-
-    // ── Закрытие комнаты ──────────────────────────────────
     socket.on('room_closed', ({ message }) => {
       console.log('[Sync] Комната закрыта:', message);
       reset();
     });
 
-    // ── Чат ───────────────────────────────────────────────
-    socket.on('new_message', (message) => {
-      addMessage(message);
-    });
-
-    // ── Реакции ───────────────────────────────────────────
-    socket.on('new_reaction', (reaction) => {
-      addReaction(reaction);
-    });
+    socket.on('new_message',  (msg)      => addMessage(msg));
+    socket.on('new_reaction', (reaction) => addReaction(reaction));
 
     return () => {
       clearInterval(driftCheckInterval);
@@ -163,7 +138,6 @@ export function useSync(videoControls, initData = '') {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Ping loop ─────────────────────────────────────────────
   function startPingLoop() {
     stopPingLoop();
     pingTimerRef.current = setInterval(() => {
@@ -180,9 +154,6 @@ export function useSync(videoControls, initData = '') {
 
   // ═══ ПУБЛИЧНЫЕ МЕТОДЫ ════════════════════════════════════
 
-  /**
-   * Хост создаёт новую комнату.
-   */
   const createRoom = useCallback(({ videoUrl, userName }) => {
     return new Promise((resolve, reject) => {
       socket.emit('create_room', { videoUrl, userName }, (res) => {
@@ -201,15 +172,6 @@ export function useSync(videoControls, initData = '') {
     });
   }, []);
 
-  /**
-   * Гость входит в существующую комнату.
-   *
-   * FIX: убрали videoControls.play() отсюда.
-   * Вместо этого seek делаем немедленно, а play() будет вызван
-   * через playback_sync когда хост продолжит воспроизведение,
-   * либо через кнопку needsGesture в VideoPlayer если браузер заблокирует.
-   * Это исключает ошибку "play() disallowed" при входе в комнату.
-   */
   const joinRoom = useCallback(({ roomId, userName }) => {
     return new Promise((resolve, reject) => {
       socket.emit('join_room', { roomId, userName }, (res) => {
@@ -224,7 +186,6 @@ export function useSync(videoControls, initData = '') {
           messages:  res.state.messages
         });
 
-        // Синхронизируем позицию сразу
         const { currentTime, isPlaying } = res.state.playback;
         const compensated = compensateLatency(
           currentTime,
@@ -232,15 +193,9 @@ export function useSync(videoControls, initData = '') {
           isPlaying
         );
         videoControls.seek(compensated);
+        lastSeekAtRef.current = Date.now(); // cooldown после начального seek
 
-        // play() НЕ вызываем программно — это заблокирует браузер.
-        // VideoPlayer покажет кнопку ▶ если хост уже играет,
-        // или гость увидит кнопку когда хост нажмёт play.
-        if (isPlaying) {
-          // Пробуем сыграть — если браузер заблокирует, VideoPlayer
-          // перехватит ошибку и покажет кнопку needsGesture
-          videoControls.play();
-        }
+        if (isPlaying) videoControls.play();
 
         setPeerConnected(true);
         resolve(res);
@@ -248,27 +203,20 @@ export function useSync(videoControls, initData = '') {
     });
   }, []);
 
-  /**
-   * Отправляем действие воспроизведения (play/pause/seek).
-   */
   const sendPlaybackAction = useCallback((action, currentTime) => {
     const { roomId } = useRoomStore.getState();
     if (!roomId) return;
+    // Ставим cooldown сразу при отправке — не ждём подтверждения от сервера
+    lastSeekAtRef.current = Date.now();
     socket.emit('playback_action', { roomId, action, currentTime });
   }, []);
 
-  /**
-   * Отправляем сообщение в чат.
-   */
   const sendMessage = useCallback((text, replyTo = null) => {
     const { roomId } = useRoomStore.getState();
     if (!roomId) return;
     socket.emit('send_message', { roomId, text, replyTo });
   }, []);
 
-  /**
-   * Отправляем реакцию.
-   */
   const sendReaction = useCallback((emoji) => {
     const { roomId } = useRoomStore.getState();
     if (!roomId) return;
