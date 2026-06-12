@@ -65,7 +65,13 @@ export function useSync(videoControls, initData = '') {
       // Обновляем Zustand store
       setPlayback({ isPlaying, currentTime: compensated });
 
-      // Управляем плеером
+      // Хост уже управляет плеером напрямую через свой UI —
+      // не нужно повторно вызывать play()/pause()/seek() по echo от сервера,
+      // иначе программный play() без жеста пользователя будет заблокирован браузером.
+      const { role } = useRoomStore.getState();
+      if (role === 'host') return;
+
+      // Управляем плеером (только гость)
       if (action === 'play') {
         videoControls.seek(compensated);
         videoControls.play();
