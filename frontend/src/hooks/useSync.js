@@ -74,7 +74,7 @@ export function useSync(videoControls, initData = '') {
       // Управляем плеером (только гость)
       if (action === 'play') {
         videoControls.seek(compensated);
-        videoControls.play();
+        videoControls.play(); // может показать кнопку если браузер заблокировал
       } else if (action === 'pause') {
         videoControls.seek(compensated);
         videoControls.pause();
@@ -88,8 +88,6 @@ export function useSync(videoControls, initData = '') {
     //
     // FIX: вместо store.currentTime (застывший снимок на момент последнего sync)
     // вычисляем "живую" ожидаемую позицию: currentTime + сколько прошло с lastSyncedAt.
-    // Без этого drift всегда был огромным (playerTime ≈ 5s, store.currentTime ≈ 0)
-    // и каждые ~10с плеер кидало seek(0).
     const driftCheckInterval = setInterval(() => {
       const store = useRoomStore.getState();
       if (!store.isPlaying || !store.roomId || store.lastSyncedAt === null) return;
@@ -115,8 +113,6 @@ export function useSync(videoControls, initData = '') {
 
     // ── Запрос актуального состояния от хоста ─────────────
     socket.on('playback_request', ({ userId, action, currentTime }) => {
-      // Хост получил запрос от гостя — обрабатываем в RoomScreen
-      // Здесь просто логируем (UI-компонент решит что делать)
       console.log(`[Sync] Запрос от гостя: ${action} @ ${currentTime}`);
     });
 
@@ -153,7 +149,6 @@ export function useSync(videoControls, initData = '') {
     return () => {
       clearInterval(driftCheckInterval);
       stopPingLoop();
-      // Отписываемся от всех событий (не дисконнектимся!)
       socket.off('connect');
       socket.off('disconnect');
       socket.off('pong');
@@ -208,6 +203,12 @@ export function useSync(videoControls, initData = '') {
 
   /**
    * Гость входит в существующую комнату.
+   *
+   * FIX: убрали videoControls.play() отсюда.
+   * Вместо этого seek делаем немедленно, а play() будет вызван
+   * через playback_sync когда хост продолжит воспроизведение,
+   * либо через кнопку needsGesture в VideoPlayer если браузер заблокирует.
+   * Это исключает ошибку "play() disallowed" при входе в комнату.
    */
   const joinRoom = useCallback(({ roomId, userName }) => {
     return new Promise((resolve, reject) => {
@@ -222,11 +223,24 @@ export function useSync(videoControls, initData = '') {
           playback:  res.state.playback,
           messages:  res.state.messages
         });
-        // Синхронизируем плеер с текущей позицией
+
+        // Синхронизируем позицию сразу
         const { currentTime, isPlaying } = res.state.playback;
-        const compensated = compensateLatency(currentTime, res.state.playback.serverTime, isPlaying);
+        const compensated = compensateLatency(
+          currentTime,
+          res.state.playback.serverTime,
+          isPlaying
+        );
         videoControls.seek(compensated);
-        if (isPlaying) videoControls.play();
+
+        // play() НЕ вызываем программно — это заблокирует браузер.
+        // VideoPlayer покажет кнопку ▶ если хост уже играет,
+        // или гость увидит кнопку когда хост нажмёт play.
+        if (isPlaying) {
+          // Пробуем сыграть — если браузер заблокирует, VideoPlayer
+          // перехватит ошибку и покажет кнопку needsGesture
+          videoControls.play();
+        }
 
         setPeerConnected(true);
         resolve(res);
@@ -236,7 +250,6 @@ export function useSync(videoControls, initData = '') {
 
   /**
    * Отправляем действие воспроизведения (play/pause/seek).
-   * Только хост может; гость отправляет запрос.
    */
   const sendPlaybackAction = useCallback((action, currentTime) => {
     const { roomId } = useRoomStore.getState();
