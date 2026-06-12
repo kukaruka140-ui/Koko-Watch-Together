@@ -14,8 +14,9 @@ const useRoomStore = create((set, get) => ({
   guestName: '',
 
   // ─── Воспроизведение ────────────────────────────────────
-  isPlaying:   false,
-  currentTime: 0,
+  isPlaying:    false,
+  currentTime:  0,
+  lastSyncedAt: null, // Date.now() в момент последнего sync — для live drift-check
 
   // ─── Чат ────────────────────────────────────────────────
   messages:  [],
@@ -36,13 +37,20 @@ const useRoomStore = create((set, get) => ({
     videoUrl,
     hostName:  hostName  || '',
     guestName: guestName || '',
-    isPlaying:   playback?.isPlaying   ?? false,
-    currentTime: playback?.currentTime ?? 0,
+    isPlaying:    playback?.isPlaying   ?? false,
+    currentTime:  playback?.currentTime ?? 0,
+    lastSyncedAt: Date.now(), // фиксируем момент получения начального состояния
     messages: messages || [],
     connectionStatus: 'connected'
   }),
 
-  setPlayback: ({ isPlaying, currentTime }) => set({ isPlaying, currentTime }),
+  // FIX: всегда сохраняем lastSyncedAt вместе с currentTime,
+  // чтобы drift-check мог вычислять "живую" ожидаемую позицию
+  setPlayback: ({ isPlaying, currentTime }) => set({
+    isPlaying,
+    currentTime,
+    lastSyncedAt: Date.now(),
+  }),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 
@@ -74,8 +82,9 @@ const useRoomStore = create((set, get) => ({
     videoUrl:  null,
     hostName:  '',
     guestName: '',
-    isPlaying:   false,
-    currentTime: 0,
+    isPlaying:    false,
+    currentTime:  0,
+    lastSyncedAt: null,
     messages:  [],
     reactions: [],
     connectionStatus: 'idle',
