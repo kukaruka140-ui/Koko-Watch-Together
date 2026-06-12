@@ -6,7 +6,7 @@ import './VideoPlayer.css';
 export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
   const videoRef = useRef(null);
   const [needsGesture, setNeedsGesture] = useState(false);
-  const pendingPlayRef = useRef(false);
+  const pendingSeekRef = useRef(null); // запомним позицию, на которой нужно стартовать
 
   const { videoUrl, isPlaying, role, reactions } = useRoomStore();
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || '';
@@ -23,7 +23,7 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
 
   const src = buildSrc(videoUrl);
 
-  // Пробрасываем методы управления наружу
+  // Пробрасываем методы управления наружу через controlsRef
   useEffect(() => {
     if (!controlsRef) return;
     controlsRef.current = {
@@ -31,10 +31,11 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
         if (!videoRef.current) return;
         const p = videoRef.current.play();
         if (p && p.catch) {
-          p.catch(() => {
-            // Браузер заблокировал autoplay — показываем кнопку
-            pendingPlayRef.current = true;
-            setNeedsGesture(true);
+          p.catch((err) => {
+            // Браузер заблокировал autoplay (NotAllowedError) — показываем кнопку
+            if (err.name === 'NotAllowedError') {
+              setNeedsGesture(true);
+            }
           });
         }
       },
@@ -43,13 +44,26 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
         videoRef.current?.pause();
       },
       seek: (t) => {
-        if (videoRef.current) videoRef.current.currentTime = t;
+        if (videoRef.current) {
+          videoRef.current.currentTime = t;
+          // Запоминаем позицию — если нужна будет кнопка, стартуем с неё
+          pendingSeekRef.current = t;
+        }
       },
-      getCurrentTime: () => videoRef.current?.currentTime || 0
+      getCurrentTime: () => videoRef.current?.currentTime || 0,
     };
   }, [controlsRef]);
 
-  // Пользователь нажал кнопку — разрешаем воспроизведение
+  // Когда видео загружено и у нас есть pending позиция — применяем seek
+  // (нужно для случая когда seek() вызвали раньше чем видео готово)
+  const handleCanPlay = useCallback(() => {
+    if (pendingSeekRef.current !== null && videoRef.current) {
+      videoRef.current.currentTime = pendingSeekRef.current;
+      pendingSeekRef.current = null;
+    }
+  }, []);
+
+  // Пользователь нажал кнопку — разрешаем воспроизведение жестом
   const handleGesturePlay = () => {
     setNeedsGesture(false);
     videoRef.current?.play();
@@ -83,6 +97,7 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
         onPlay={handlePlay}
         onPause={handlePause}
         onSeeked={handleSeeked}
+        onCanPlay={handleCanPlay}
         style={{ width: '100%', height: '100%', display: 'block' }}
       />
 
