@@ -4,11 +4,16 @@ import ReactionFloat from '../Chat/ReactionFloat';
 import './VideoPlayer.css';
 
 export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
-  const videoRef = useRef(null);
-  const [needsGesture, setNeedsGesture] = useState(false);
-  const pendingSeekRef = useRef(null); // запомним позицию, на которой нужно стартовать
+  const videoRef        = useRef(null);
+  const pendingSeekRef  = useRef(null);
+  // FIX: флаг "цей seek зроблений програмно (не юзером)"
+  // Коли true — handleSeeked не відправляє sendPlaybackAction на сервер,
+  // інакше виникала петля: drift-seek → onSeeked → playback_sync → seek → ...
+  const programmaticRef = useRef(false);
 
-  const { videoUrl, isPlaying, role, reactions } = useRoomStore();
+  const [needsGesture, setNeedsGesture] = useState(false);
+
+  const { videoUrl, role, reactions } = useRoomStore();
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || '';
 
   const buildSrc = (url) => {
@@ -23,16 +28,15 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
 
   const src = buildSrc(videoUrl);
 
-  // Пробрасываем методы управления наружу через controlsRef
   useEffect(() => {
     if (!controlsRef) return;
     controlsRef.current = {
       play: () => {
         if (!videoRef.current) return;
+        // play теж програмний — але не seek, тому не ставимо programmaticRef
         const p = videoRef.current.play();
         if (p && p.catch) {
           p.catch((err) => {
-            // Браузер заблокировал autoplay (NotAllowedError) — показываем кнопку
             if (err.name === 'NotAllowedError') {
               setNeedsGesture(true);
             }
@@ -44,43 +48,54 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
         videoRef.current?.pause();
       },
       seek: (t) => {
-        if (videoRef.current) {
-          videoRef.current.currentTime = t;
-          // Запоминаем позицию — если нужна будет кнопка, стартуем с неё
-          pendingSeekRef.current = t;
-        }
+        if (!videoRef.current) return;
+        // Позначаємо що це програмний seek — handleSeeked має його проігнорувати
+        programmaticRef.current = true;
+        videoRef.current.currentTime = t;
+        pendingSeekRef.current = t;
       },
       getCurrentTime: () => videoRef.current?.currentTime || 0,
     };
   }, [controlsRef]);
 
-  // Когда видео загружено и у нас есть pending позиция — применяем seek
-  // (нужно для случая когда seek() вызвали раньше чем видео готово)
   const handleCanPlay = useCallback(() => {
     if (pendingSeekRef.current !== null && videoRef.current) {
+      programmaticRef.current = true;
       videoRef.current.currentTime = pendingSeekRef.current;
       pendingSeekRef.current = null;
     }
   }, []);
 
-  // Пользователь нажал кнопку — разрешаем воспроизведение жестом
   const handleGesturePlay = () => {
     setNeedsGesture(false);
     videoRef.current?.play();
   };
 
+  // Хост натиснув play вручну
   const handlePlay = useCallback(() => {
     if (role !== 'host') return;
     onPlay?.(videoRef.current?.currentTime || 0);
   }, [role, onPlay]);
 
+  // Хост натиснув pause вручну
   const handlePause = useCallback(() => {
     if (role !== 'host') return;
     onPause?.(videoRef.current?.currentTime || 0);
   }, [role, onPause]);
 
+  // FIX: handleSeeked перевіряє programmaticRef.
+  // Якщо seek зроблений кодом (drift-корекція, playback_sync) — ігноруємо.
+  // Якщо seek зроблений юзером (скраббінг таймлайну) — відправляємо на сервер.
   const handleSeeked = useCallback(() => {
     if (role !== 'host') return;
+
+    if (programmaticRef.current) {
+      // Програмний seek — скидаємо флаг і нічого не відправляємо
+      programmaticRef.current = false;
+      return;
+    }
+
+    // Це дійсно дія юзера — синхронізуємо з гостем
     onSeek?.(videoRef.current?.currentTime || 0);
   }, [role, onSeek]);
 
