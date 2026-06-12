@@ -6,7 +6,7 @@
 //  Оба видят реакции и могут писать в чат.
 // ============================================================
 
-import { useRef, useState, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import VideoPlayer from '../VideoPlayer/VideoPlayer';
 import ChatPanel from '../Chat/ChatPanel';
 import useRoomStore from '../../store/useRoomStore';
@@ -15,7 +15,7 @@ import useRoomStore from '../../store/useRoomStore';
  * @param {object}   syncMethods — { sendPlaybackAction, sendMessage, sendReaction }
  * @param {function} onLeave     — callback при выходе из комнаты
  */
-export default function RoomScreen({ syncMethods, onLeave }) {
+export default function RoomScreen({ syncMethods, onLeave, videoControlsRef }) {
   const {
     roomId, role, videoUrl,
     hostName, guestName,
@@ -24,8 +24,7 @@ export default function RoomScreen({ syncMethods, onLeave }) {
 
   const { sendPlaybackAction, sendMessage, sendReaction } = syncMethods;
 
-  // ref для передачи методов VideoPlayer'а в useSync
-  const videoControlsRef = useRef(null);
+  // ref для передачи методов VideoPlayer'а в useSync — приходит из App.jsx
 
   const [showRoomInfo, setShowRoomInfo] = useState(false);
   const [copied, setCopied]             = useState(false);
