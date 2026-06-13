@@ -6,11 +6,7 @@ import './VideoPlayer.css';
 export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
   const videoRef        = useRef(null);
   const pendingSeekRef  = useRef(null);
-  // FIX: флаг "цей seek зроблений програмно (не юзером)"
-  // Коли true — handleSeeked не відправляє sendPlaybackAction на сервер,
-  // інакше виникала петля: drift-seek → onSeeked → playback_sync → seek → ...
-  const programmaticRef = useRef(false);
-
+  const programmaticRef = useRef(false); // true = seek зроблений кодом, не юзером
   const [needsGesture, setNeedsGesture] = useState(false);
 
   const { videoUrl, role, reactions } = useRoomStore();
@@ -18,9 +14,7 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
 
   const buildSrc = (url) => {
     if (!url) return '';
-    if (!url.includes('drive.google.com') && !url.includes('googleapis.com')) {
-      return url;
-    }
+    if (!url.includes('drive.google.com') && !url.includes('googleapis.com')) return url;
     const match = url.match(/\/d\/([a-zA-Z0-9_-]{10,})/);
     const fileId = match?.[1] || url;
     return `${BACKEND_URL}/api/stream?fileId=${fileId}`;
@@ -33,13 +27,10 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
     controlsRef.current = {
       play: () => {
         if (!videoRef.current) return;
-        // play теж програмний — але не seek, тому не ставимо programmaticRef
         const p = videoRef.current.play();
-        if (p && p.catch) {
+        if (p?.catch) {
           p.catch((err) => {
-            if (err.name === 'NotAllowedError') {
-              setNeedsGesture(true);
-            }
+            if (err.name === 'NotAllowedError') setNeedsGesture(true);
           });
         }
       },
@@ -49,8 +40,7 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
       },
       seek: (t) => {
         if (!videoRef.current) return;
-        // Позначаємо що це програмний seek — handleSeeked має його проігнорувати
-        programmaticRef.current = true;
+        programmaticRef.current = true; // позначаємо: це НЕ дія юзера
         videoRef.current.currentTime = t;
         pendingSeekRef.current = t;
       },
@@ -71,37 +61,30 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
     videoRef.current?.play();
   };
 
-  // Хост натиснув play вручну
   const handlePlay = useCallback(() => {
     if (role !== 'host') return;
     onPlay?.(videoRef.current?.currentTime || 0);
   }, [role, onPlay]);
 
-  // Хост натиснув pause вручну
   const handlePause = useCallback(() => {
     if (role !== 'host') return;
     onPause?.(videoRef.current?.currentTime || 0);
   }, [role, onPause]);
 
-  // FIX: handleSeeked перевіряє programmaticRef.
-  // Якщо seek зроблений кодом (drift-корекція, playback_sync) — ігноруємо.
-  // Якщо seek зроблений юзером (скраббінг таймлайну) — відправляємо на сервер.
+  // Ключовий фікс: якщо seek зроблений програмно — скидаємо флаг і НЕ
+  // відправляємо sendPlaybackAction. Без цього виникала петля:
+  // drift-seek → onSeeked → sendPlaybackAction → playback_sync → seek → ...
   const handleSeeked = useCallback(() => {
     if (role !== 'host') return;
-
     if (programmaticRef.current) {
-      // Програмний seek — скидаємо флаг і нічого не відправляємо
       programmaticRef.current = false;
       return;
     }
-
-    // Це дійсно дія юзера — синхронізуємо з гостем
     onSeek?.(videoRef.current?.currentTime || 0);
   }, [role, onSeek]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000' }}>
-
       <video
         ref={videoRef}
         src={src}
@@ -116,12 +99,10 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
         style={{ width: '100%', height: '100%', display: 'block' }}
       />
 
-      {/* Блокируем контролы для гостя */}
       {role === 'guest' && !needsGesture && (
         <div style={{ position: 'absolute', inset: 0, zIndex: 10 }} />
       )}
 
-      {/* Кнопка для гостя когда браузер заблокировал autoplay */}
       {needsGesture && (
         <div style={{
           position: 'absolute', inset: 0, zIndex: 20,
@@ -129,57 +110,37 @@ export default function VideoPlayer({ onPlay, onPause, onSeek, controlsRef }) {
           alignItems: 'center', justifyContent: 'center',
           background: 'rgba(0,0,0,0.75)'
         }}>
-          <button
-            onClick={handleGesturePlay}
-            style={{
-              background: 'linear-gradient(135deg, #7C5CFC, #5A3FD4)',
-              color: '#fff',
-              border: 'none',
-              borderRadius: 50,
-              width: 72,
-              height: 72,
-              fontSize: 28,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginBottom: 16,
-              boxShadow: '0 0 24px rgba(124,92,252,0.5)'
-            }}
-          >
-            ▶
-          </button>
+          <button onClick={handleGesturePlay} style={{
+            background: 'linear-gradient(135deg, #7C5CFC, #5A3FD4)',
+            color: '#fff', border: 'none', borderRadius: 50,
+            width: 72, height: 72, fontSize: 28, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            marginBottom: 16, boxShadow: '0 0 24px rgba(124,92,252,0.5)'
+          }}>▶</button>
           <p style={{ color: '#fff', fontSize: 14, margin: 0, opacity: 0.8 }}>
-            Нажми чтобы присоединиться
+            Натисни щоб приєднатись
           </p>
         </div>
       )}
 
-      {/* Бейдж LIVE */}
       <div style={{
         position: 'absolute', top: 12, right: 12,
         background: 'rgba(255,0,0,0.8)', color: '#fff',
-        fontSize: 11, fontWeight: 600,
-        padding: '3px 8px', borderRadius: 20,
-        pointerEvents: 'none', zIndex: 25
-      }}>
-        🔴 LIVE
-      </div>
+        fontSize: 11, fontWeight: 600, padding: '3px 8px',
+        borderRadius: 20, pointerEvents: 'none', zIndex: 25
+      }}>🔴 LIVE</div>
 
-      {/* Реакции */}
       <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'hidden', zIndex: 30 }}>
         {reactions.map(r => <ReactionFloat key={r.id} reaction={r} />)}
       </div>
 
-      {/* Заглушка если нет видео */}
       {!videoUrl && (
         <div style={{
-          position: 'absolute', inset: 0,
-          display: 'flex', flexDirection: 'column',
+          position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center',
           background: '#0A0A0F', color: '#6B6B8A'
         }}>
-          <p style={{ fontSize: 14 }}>Видео не загружено</p>
+          <p style={{ fontSize: 14 }}>Відео не завантажено</p>
         </div>
       )}
     </div>
